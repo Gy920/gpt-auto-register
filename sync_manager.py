@@ -109,17 +109,23 @@ class AccountSyncManager:
         try:
             url = f"{self.sub2api_base_url.rstrip('/')}/api/v1/admin/accounts"
 
+            # Sub2Api API 格式: name + credentials 对象
+            credentials = {}
+            if access_token:
+                credentials["access_token"] = access_token
+            if refresh_token:
+                credentials["refresh_token"] = refresh_token
+
             payload = {
-                "email": email,
-                "password": password,
+                "name": email,  # Sub2Api 使用 name 字段
                 "platform": "openai",
                 "type": "oauth",
+                "credentials": credentials if credentials else None,
             }
 
-            if access_token:
-                payload["access_token"] = access_token
-            if refresh_token:
-                payload["refresh_token"] = refresh_token
+            # 移除空值
+            payload = {k: v for k, v in payload.items() if v is not None}
+
             if self.sub2api_group_ids:
                 payload["group_ids"] = self.sub2api_group_ids
 
