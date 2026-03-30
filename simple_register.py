@@ -1123,7 +1123,10 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
                         try:
                             from sync_manager import AccountSyncManager
                             sync_mgr = AccountSyncManager()
-                            token_path = os.path.join(TOKEN_JSON_DIR, f"{email}.json")
+                            # 使用与 _save_codex_tokens 相同的路径计算方式
+                            base_dir = os.path.dirname(os.path.abspath(__file__))
+                            token_dir = TOKEN_JSON_DIR if os.path.isabs(TOKEN_JSON_DIR) else os.path.join(base_dir, TOKEN_JSON_DIR)
+                            token_path = os.path.join(token_dir, f"{email}.json")
 
                             if AUTO_UPLOAD_CPA:
                                 if sync_mgr.upload_to_cpa(token_path):
