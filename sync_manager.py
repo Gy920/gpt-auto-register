@@ -271,15 +271,17 @@ def main():
         if manager.enable_sub2api:
             result = manager.check_sub2api_health(args.min_healthy)
             print(f"[Sync] Sub2Api 状态:")
-            print(f"  总账号: {result['total']}")
-            print(f"  阈值: {result['threshold']}")
-            print(f"  健康: {'✅' if result['healthy'] else '❌'}")
+            print(f"  总账号: {result.get('total', 'N/A')}")
+            print(f"  遍值: {result.get('threshold', args.min_healthy)}")
+            if result.get("error"):
+                print(f"  错误: {result.get('error')}")
+            print(f"  健康: {'✅' if result.get('healthy') else '❌'}")
             print(f"  需注册: {'是' if result.get('need_register') else '否'}")
 
             if result.get("need_register"):
                 return 100  # 特殊返回码表示需要注册
-        else:
-            print("[Sync] Sub2Api 未配置，无法检查健康度")
+            else:
+                print("[Sync] Sub2Api 未配置，无法检查健康度")
         return 0
 
     elif args.action == "sync":

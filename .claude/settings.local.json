@@ -44,7 +44,10 @@
       "Bash(grep -oE \"\"duckmail_bearer\"\":s*\"\"[^\"\"]*\"\" C:Usersxs.claudeprojectsD--code-codex-register-auto-cpa-register622a4bc9-63d5-48b3-8dc4-2adb857bd812.jsonl)",
       "Bash(grep -oP \"\"duckmail_bearer\"\":s*\"\"[^\"\"]+\"\" C:Usersxs.claudeprojectsD--code-codex-register-auto-cpa-register622a4bc9-63d5-48b3-8dc4-2adb857bd812.jsonl)",
       "Bash(grep -oE mk-[a-zA-Z0-9]+ C:Usersxs.claudeprojectsD--code-codex-register-auto-cpa-register622a4bc9-63d5-48b3-8dc4-2adb857bd812.jsonl)",
-      "Bash(grep -r sk-[a-zA-Z0-9]+ C:Usersxs.claudeprojectsD--code-codex-register-auto-cpa-register --include=*.json)"
+      "Bash(grep -r sk-[a-zA-Z0-9]+ C:Usersxs.claudeprojectsD--code-codex-register-auto-cpa-register --include=*.json)",
+      "Bash(powershell -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/autocodexregister/gpt-auto-register' -UseBasicParsing | Select-Object -ExpandProperty StatusCode\")",
+      "Bash(powershell -Command \"Invoke-WebRequest -Uri 'https://api.github.com/orgs/autocodexregister/repos' -UseBasicParsing | Select-Object -ExpandProperty Content\")",
+      "Bash(gh auth:*)"
     ]
   }
 }
