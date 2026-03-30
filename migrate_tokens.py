@@ -75,61 +75,83 @@ def migrate_token_file(token_path: str, dry_run: bool = False) -> dict:
     email = token_data.get("email", Path(token_path).stem)
     access_token = token_data.get("access_token", "")
     id_token = token_data.get("id_token", "")
-    chatgpt_account_id = token_data.get("chatgpt_account_id", token_data.get("account_id", ""))
-    chatgpt_user_id = token_data.get("chatgpt_user_id", "")
+    refresh_token = token_data.get("refresh_token", "")
     session_token = token_data.get("session_token", "")
 
-    # 从 access_token 解析用户信息
-    if access_token:
-        payload = _decode_jwt_payload(access_token)
+    # 优先从顶层获取 account_id
+    chatgpt_account_id = token_data.get("chatgpt_account_id") or token_data.get("account_id", "")
+    chatgpt_user_id = token_data.get("chatgpt_user_id", "")
+
+    # 从 id_token 解析用户信息（最可靠）
+    if id_token:
+        payload = _decode_jwt_payload(id_token)
         auth_info = payload.get("https://api.openai.com/auth", {})
         if not chatgpt_account_id:
             chatgpt_account_id = auth_info.get("chatgpt_account_id", "")
         if not chatgpt_user_id:
             chatgpt_user_id = auth_info.get("chatgpt_user_id", "")
 
-    changes = []
+    # 从 access_token 解析用户信息（备选）
+    if not chatgpt_account_id and access_token:
+        payload = _decode_jwt_payload(access_token)
+        auth_info = payload.get("https://api.openai.com/auth", {})
+        chatgpt_account_id = auth_info.get("chatgpt_account_id", "")
+        if not chatgpt_user_id:
+            chatgpt_user_id = auth_info.get("chatgpt_user_id", "")
 
-    # 如果缺少 id_token 或 chatgpt_account_id，需要补全
-    needs_fix = False
-
+    # 如果仍然没有 id_token 但有 account_id，生成兼容的
     if not id_token and chatgpt_account_id:
-        needs_fix = True
         exp_timestamp = None
         if access_token:
             payload = _decode_jwt_payload(access_token)
             exp_timestamp = payload.get("exp")
-        new_id_token = _generate_compatible_id_token(email, chatgpt_account_id, chatgpt_user_id, exp_timestamp)
-        token_data["id_token"] = new_id_token
-        changes.append(f"补全 id_token")
+        id_token = _generate_compatible_id_token(email, chatgpt_account_id, chatgpt_user_id, exp_timestamp)
 
     if not chatgpt_account_id:
         result["status"] = "skipped"
-        result["error"] = "缺少 chatgpt_account_id，无法补全"
+        result["error"] = "缺少 chatgpt_account_id"
         return result
 
+    changes = []
+
     # 补全顶层字段
+    if id_token and not token_data.get("id_token"):
+        token_data["id_token"] = id_token
+        changes.append("补全 id_token")
+
     if not token_data.get("chatgpt_account_id"):
         token_data["chatgpt_account_id"] = chatgpt_account_id
-        changes.append("补全顶层 chatgpt_account_id")
+        changes.append("补全 chatgpt_account_id")
 
     if chatgpt_user_id and not token_data.get("chatgpt_user_id"):
         token_data["chatgpt_user_id"] = chatgpt_user_id
-        changes.append("补全顶层 chatgpt_user_id")
+        changes.append("补全 chatgpt_user_id")
 
     if session_token and not token_data.get("session_token"):
         token_data["session_token"] = session_token
-        changes.append("补全顶层 session_token")
+        changes.append("补全 session_token")
 
     # 补全 credentials 字段
     credentials = token_data.get("credentials", {})
     credentials_updated = False
 
-    if not credentials.get("id_token") and token_data.get("id_token"):
-        credentials["id_token"] = token_data["id_token"]
+    if not credentials:
+        credentials = {}
         credentials_updated = True
 
-    if not credentials.get("chatgpt_account_id"):
+    if access_token and not credentials.get("access_token"):
+        credentials["access_token"] = access_token
+        credentials_updated = True
+
+    if refresh_token and not credentials.get("refresh_token"):
+        credentials["refresh_token"] = refresh_token
+        credentials_updated = True
+
+    if id_token and not credentials.get("id_token"):
+        credentials["id_token"] = id_token
+        credentials_updated = True
+
+    if chatgpt_account_id and not credentials.get("chatgpt_account_id"):
         credentials["chatgpt_account_id"] = chatgpt_account_id
         credentials_updated = True
 
@@ -143,7 +165,7 @@ def migrate_token_file(token_path: str, dry_run: bool = False) -> dict:
 
     if credentials_updated:
         token_data["credentials"] = credentials
-        changes.append("补全 credentials 字段")
+        changes.append("补全 credentials")
 
     if not changes:
         result["status"] = "ok"
