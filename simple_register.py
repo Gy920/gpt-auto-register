@@ -143,6 +143,10 @@ TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 HTTP_TIMEOUT = max(10, int(_CONFIG.get("http_timeout_seconds", 30)))
 FORCE_IPV6 = _as_bool(_CONFIG.get("force_ipv6", False))
 
+# 自动上传配置
+AUTO_UPLOAD_CPA = _as_bool(os.environ.get("AUTO_UPLOAD_CPA", _CONFIG.get("auto_upload_cpa", False)))
+AUTO_UPLOAD_SUB2API = _as_bool(os.environ.get("AUTO_UPLOAD_SUB2API", _CONFIG.get("auto_upload_sub2api", False)))
+
 # 全局锁
 _print_lock = threading.Lock()
 _file_lock = threading.Lock()
@@ -1112,6 +1116,23 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
                 if oauth_ok:
                     _save_codex_tokens(email, tokens)
                     reg._print("[OAuth] Token 已保存")
+
+                    # 立即同步到 CPA 和 Sub2Api
+                    if AUTO_UPLOAD_CPA or AUTO_UPLOAD_SUB2API:
+                        try:
+                            from sync_manager import AccountSyncManager
+                            sync_mgr = AccountSyncManager()
+                            token_path = os.path.join(TOKEN_JSON_DIR, f"{email}.json")
+
+                            if AUTO_UPLOAD_CPA:
+                                sync_mgr.upload_to_cpa(token_path)
+
+                            if AUTO_UPLOAD_SUB2API:
+                                access_token = tokens.get("access_token", "")
+                                refresh_token = tokens.get("refresh_token", "")
+                                sync_mgr.upload_to_sub2api(email, chatgpt_password, access_token, refresh_token)
+                        except Exception as sync_e:
+                            reg._print(f"[Sync] 同步失败: {sync_e}")
                 else:
                     msg = "OAuth 获取失败"
                     if OAUTH_REQUIRED:
