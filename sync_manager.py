@@ -37,7 +37,8 @@ class AccountSyncManager:
 
         # Sub2Api 配置 (环境变量优先，config.json 作为备选)
         self.sub2api_base_url = os.getenv("SUB2API_BASE_URL") or config.get("sub2api_base_url", "https://sub2api.xspace.icu")
-        self.sub2api_admin_key = os.getenv("SUB2API_ADMIN_KEY") or config.get("sub2api_bearer", "")
+        # 支持两种环境变量名: SUB2API_BEARER (GitHub Actions) 或 SUB2API_ADMIN_KEY
+        self.sub2api_admin_key = os.getenv("SUB2API_BEARER") or os.getenv("SUB2API_ADMIN_KEY") or config.get("sub2api_bearer", "")
         group_ids_str = os.getenv("SUB2API_GROUP_IDS", "")
         if group_ids_str:
             self.sub2api_group_ids = [int(x) for x in group_ids_str.split(",") if x.strip()]
