@@ -505,38 +505,93 @@ def _decode_jwt_payload(token: str):
         return {}
 
 
-def _build_codex_token_data(email: str, tokens: dict) -> dict:
+def _generate_compatible_id_token(email: str, chatgpt_account_id: str, chatgpt_user_id: str, exp_timestamp: int = None) -> str:
+    """生成兼容的 id_token（最小 JWT 结构，用于 CPA 额度解析）"""
+    import time
+
+    if not exp_timestamp:
+        exp_timestamp = int(time.time()) + 3600 * 24 * 7  # 7天有效期
+
+    # JWT header
+    header = {"alg": "none", "typ": "JWT"}
+
+    # JWT payload - 包含 CPA 需要的所有字段
+    payload = {
+        "email": email,
+        "exp": exp_timestamp,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": chatgpt_account_id,
+            "chatgpt_user_id": chatgpt_user_id,
+            "plan_type": "chatgptplus"
+        }
+    }
+
+    # Base64URL 编码（无签名）
+    def b64url_encode(data):
+        import base64
+        json_str = json.dumps(data, separators=(',', ':'))
+        return base64.urlsafe_b64encode(json_str.encode()).rstrip(b'=').decode()
+
+    header_b64 = b64url_encode(header)
+    payload_b64 = b64url_encode(payload)
+
+    # 返回无签名的 JWT（CPA 只解析 payload，不验证签名）
+    return f"{header_b64}.{payload_b64}."
+
+
+def _build_codex_token_data(email: str, tokens: dict, session_token: str = "") -> dict:
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
     id_token = tokens.get("id_token", "")
 
+    # 从 access_token 解析用户信息
     payload = _decode_jwt_payload(access_token) if access_token else {}
     auth_info = payload.get("https://api.openai.com/auth", {})
-    account_id = auth_info.get("chatgpt_account_id", "")
+    chatgpt_account_id = auth_info.get("chatgpt_account_id", "")
+    chatgpt_user_id = auth_info.get("chatgpt_user_id", "")
     exp_timestamp = payload.get("exp")
+
     expired_str = ""
     if isinstance(exp_timestamp, int) and exp_timestamp > 0:
         from datetime import datetime, timezone, timedelta
         exp_dt = datetime.fromtimestamp(exp_timestamp, tz=timezone(timedelta(hours=8)))
         expired_str = exp_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
+    # 如果没有真实的 id_token，生成兼容的 id_token
+    if not id_token and chatgpt_account_id:
+        id_token = _generate_compatible_id_token(email, chatgpt_account_id, chatgpt_user_id, exp_timestamp)
+
     from datetime import datetime, timezone, timedelta
     now = datetime.now(tz=timezone(timedelta(hours=8)))
+
+    # 构建 token 数据，包含 CPA 需要的所有字段
     return {
         "type": "codex",
         "email": email,
         "expired": expired_str,
         "id_token": id_token,
-        "account_id": account_id,
+        "account_id": chatgpt_account_id,
+        "chatgpt_account_id": chatgpt_account_id,
+        "chatgpt_user_id": chatgpt_user_id,
+        "session_token": session_token,
         "access_token": access_token,
         "last_refresh": now.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
         "refresh_token": refresh_token,
+        "credentials": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "id_token": id_token,
+            "chatgpt_account_id": chatgpt_account_id,
+            "chatgpt_user_id": chatgpt_user_id,
+            "session_token": session_token,
+        }
     }
 
 
 def _save_codex_tokens(email: str, tokens: dict):
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
+    session_token = tokens.get("session_token", "")
 
     if access_token:
         with _file_lock:
@@ -551,7 +606,7 @@ def _save_codex_tokens(email: str, tokens: dict):
     if not access_token:
         return
 
-    token_data = _build_codex_token_data(email, tokens)
+    token_data = _build_codex_token_data(email, tokens, session_token)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     token_dir = TOKEN_JSON_DIR if os.path.isabs(TOKEN_JSON_DIR) else os.path.join(base_dir, TOKEN_JSON_DIR)
     os.makedirs(token_dir, exist_ok=True)
@@ -1019,6 +1074,16 @@ class ChatGPTRegister:
         except Exception as e:
             self._print(f"[OAuth] Session 刷新失败: {e}")
 
+        # 提取 session_token from cookies
+        session_token = ""
+        try:
+            for cookie in self.session.cookies:
+                if cookie.name == "__Secure-next-auth.session-token" or cookie.name == "next-auth.session-token":
+                    session_token = cookie.value
+                    break
+        except Exception:
+            pass
+
         # 直接访问 session API 获取 token
         url = f"{self.BASE}/api/auth/session"
         r = self._request("GET", url, headers={"Accept": "application/json", "Referer": f"{self.BASE}/"})
@@ -1034,6 +1099,7 @@ class ChatGPTRegister:
                 "access_token": access_token,
                 "refresh_token": data.get("refreshToken", ""),
                 "id_token": data.get("id", ""),
+                "session_token": session_token,
             }
 
         self._print(f"[OAuth] Session 中无 token，尝试重新访问...")
@@ -1046,6 +1112,15 @@ class ChatGPTRegister:
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 }, allow_redirects=True)
 
+                # 再次提取 session_token
+                try:
+                    for cookie in self.session.cookies:
+                        if cookie.name == "__Secure-next-auth.session-token" or cookie.name == "next-auth.session-token":
+                            session_token = cookie.value
+                            break
+                except Exception:
+                    pass
+
                 # 再次尝试获取 token
                 r = self._request("GET", url, headers={"Accept": "application/json", "Referer": f"{self.BASE}/"})
                 data = r.json()
@@ -1056,6 +1131,7 @@ class ChatGPTRegister:
                         "access_token": access_token,
                         "refresh_token": data.get("refreshToken", ""),
                         "id_token": data.get("id", ""),
+                        "session_token": session_token,
                     }
             except Exception as e:
                 self._print(f"[OAuth] 回退方案失败: {e}")
