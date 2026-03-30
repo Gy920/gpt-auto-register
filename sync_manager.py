@@ -49,6 +49,12 @@ class AccountSyncManager:
         self.enable_cpa = bool(self.cpa_management_key)
         self.enable_sub2api = bool(self.sub2api_admin_key)
 
+        # 调试信息
+        if self.enable_sub2api:
+            print(f"[Sync] Sub2Api 配置: {self.sub2api_base_url} | Key: {self.sub2api_admin_key[:15]}...")
+        else:
+            print("[Sync] Sub2Api 未配置或 Key 为空")
+
     def _print(self, msg: str):
         print(f"[Sync] {msg}")
 
@@ -144,7 +150,15 @@ class AccountSyncManager:
                 self._print(f"Sub2Api 上传成功: {email}")
                 return True
             else:
-                self._print(f"Sub2Api 上传失败: {resp.status_code}")
+                # 添加详细错误信息
+                try:
+                    error_body = resp.text[:200]
+                except Exception:
+                    error_body = "无法读取响应"
+                self._print(f"Sub2Api 上传失败: {resp.status_code} - {error_body}")
+                # 调试信息
+                self._print(f"  URL: {url}")
+                self._print(f"  Key prefix: {self.sub2api_admin_key[:15] if self.sub2api_admin_key else 'None'}...")
                 return False
         except Exception as e:
             self._print(f"Sub2Api 上传异常: {e}")
