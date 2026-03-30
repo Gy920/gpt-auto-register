@@ -1119,20 +1119,29 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
 
                     # 立即同步到 CPA 和 Sub2Api
                     if AUTO_UPLOAD_CPA or AUTO_UPLOAD_SUB2API:
+                        reg._print("[Sync] 开始同步到平台...")
                         try:
                             from sync_manager import AccountSyncManager
                             sync_mgr = AccountSyncManager()
                             token_path = os.path.join(TOKEN_JSON_DIR, f"{email}.json")
 
                             if AUTO_UPLOAD_CPA:
-                                sync_mgr.upload_to_cpa(token_path)
+                                if sync_mgr.upload_to_cpa(token_path):
+                                    reg._print("[Sync] ✅ CPA 上传成功")
+                                else:
+                                    reg._print("[Sync] ❌ CPA 上传失败")
 
                             if AUTO_UPLOAD_SUB2API:
                                 access_token = tokens.get("access_token", "")
                                 refresh_token = tokens.get("refresh_token", "")
-                                sync_mgr.upload_to_sub2api(email, chatgpt_password, access_token, refresh_token)
+                                if sync_mgr.upload_to_sub2api(email, chatgpt_password, access_token, refresh_token):
+                                    reg._print("[Sync] ✅ Sub2Api 上传成功")
+                                else:
+                                    reg._print("[Sync] ❌ Sub2Api 上传失败")
                         except Exception as sync_e:
-                            reg._print(f"[Sync] 同步失败: {sync_e}")
+                            reg._print(f"[Sync] ❌ 同步异常: {sync_e}")
+                            import traceback
+                            traceback.print_exc()
                 else:
                     msg = "OAuth 获取失败"
                     if OAUTH_REQUIRED:
