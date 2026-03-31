@@ -37,8 +37,13 @@ class AccountSyncManager:
 
         # Sub2Api 配置 (环境变量优先，config.json 作为备选)
         self.sub2api_base_url = os.getenv("SUB2API_BASE_URL") or config.get("sub2api_base_url", "https://sub2api.xspace.icu")
-        # 支持两种环境变量名: SUB2API_BEARER (GitHub Actions) 或 SUB2API_ADMIN_KEY
-        self.sub2api_admin_key = os.getenv("SUB2API_BEARER") or os.getenv("SUB2API_ADMIN_KEY") or config.get("sub2api_bearer", "")
+        # 支持三种认证方式:
+        # 1. SUB2API_BEARER / SUB2API_ADMIN_KEY - 静态 Bearer token
+        # 2. SUB2API_EMAIL + SUB2API_PASSWORD - 动态登录获取 token
+        self.sub2api_bearer = os.getenv("SUB2API_BEARER") or os.getenv("SUB2API_ADMIN_KEY") or config.get("sub2api_bearer", "")
+        self.sub2api_email = os.getenv("SUB2API_EMAIL") or config.get("sub2api_email", "")
+        self.sub2api_password = os.getenv("SUB2API_PASSWORD") or config.get("sub2api_password", "")
+        self.sub2api_token = ""  # 动态获取的 JWT token
         group_ids_str = os.getenv("SUB2API_GROUP_IDS", "")
         if group_ids_str:
             self.sub2api_group_ids = [int(x) for x in group_ids_str.split(",") if x.strip()]
@@ -47,16 +52,64 @@ class AccountSyncManager:
 
         # 配置是否启用
         self.enable_cpa = bool(self.cpa_management_key)
-        self.enable_sub2api = bool(self.sub2api_admin_key)
+        self.enable_sub2api = bool(self.sub2api_bearer) or (bool(self.sub2api_email) and bool(self.sub2api_password))
 
         # 调试信息
-        if self.enable_sub2api:
-            print(f"[Sync] Sub2Api 配置: {self.sub2api_base_url} | Key: {self.sub2api_admin_key[:15]}...")
+        if self.sub2api_bearer:
+            print(f"[Sync] Sub2Api 配置: {self.sub2api_base_url} | Key: {self.sub2api_bearer[:15]}...")
+        elif self.sub2api_email:
+            print(f"[Sync] Sub2Api 配置: {self.sub2api_base_url} | Email: {self.sub2api_email}")
         else:
             print("[Sync] Sub2Api 未配置或 Key 为空")
 
     def _print(self, msg: str):
         print(f"[Sync] {msg}")
+
+    # ==================== Sub2Api 认证 ====================
+
+    def _sub2api_login(self) -> Optional[str]:
+        """使用邮箱密码登录获取 JWT token"""
+        if not self.sub2api_email or not self.sub2api_password:
+            return None
+        try:
+            login_url = f"{self.sub2api_base_url.rstrip('/')}/auth/login"
+            resp = self.session.post(
+                login_url,
+                json={"email": self.sub2api_email, "password": self.sub2api_password},
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                token = data.get("data", {}).get("access_token", "")
+                if token:
+                    self._print(f"Sub2Api 登录成功，获取到 token")
+                    return token
+            self._print(f"Sub2Api 登录失败: {resp.status_code} - {resp.text[:100]}")
+            return None
+        except Exception as e:
+            self._print(f"Sub2Api 登录异常: {e}")
+            return None
+
+    def _get_sub2api_token(self) -> Optional[str]:
+        """获取 Sub2Api 认证 token (优先使用静态 Bearer，否则动态登录)"""
+        # 优先使用静态 Bearer token
+        if self.sub2api_bearer:
+            return self.sub2api_bearer
+        # 动态登录获取 token
+        if self.sub2api_token:
+            return self.sub2api_token
+        if self.sub2api_email and self.sub2api_password:
+            self.sub2api_token = self._sub2api_login()
+            return self.sub2api_token
+        return None
+
+    def _get_sub2api_headers(self) -> Dict:
+        """获取 Sub2Api 请求头"""
+        token = self._get_sub2api_token()
+        if token:
+            return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        return {}
 
     # ==================== CPA 相关 ====================
 
@@ -139,10 +192,7 @@ class AccountSyncManager:
             resp = self.session.post(
                 url,
                 json=payload,
-                headers={
-                    "X-API-Key": self.sub2api_admin_key,
-                    "Content-Type": "application/json"
-                },
+                headers=self._get_sub2api_headers(),
                 timeout=30
             )
 
@@ -156,9 +206,7 @@ class AccountSyncManager:
                 except Exception:
                     error_body = "无法读取响应"
                 self._print(f"Sub2Api 上传失败: {resp.status_code} - {error_body}")
-                # 调试信息
                 self._print(f"  URL: {url}")
-                self._print(f"  Key prefix: {self.sub2api_admin_key[:15] if self.sub2api_admin_key else 'None'}...")
                 return False
         except Exception as e:
             self._print(f"Sub2Api 上传异常: {e}")
@@ -266,7 +314,7 @@ class AccountSyncManager:
             resp = self.session.get(
                 url,
                 params={"page": 1, "page_size": 1, "platform": "openai", "type": "oauth"},
-                headers={"X-API-Key": self.sub2api_admin_key},
+                headers=self._get_sub2api_headers(),
                 timeout=20
             )
             resp.raise_for_status()
