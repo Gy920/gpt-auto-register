@@ -250,7 +250,10 @@ def _create_temp_email(session, api_base: str, api_key: str, impersonate: str = 
     email_local = "".join(random.choice(chars) for _ in range(length))
 
     domains = _load_moemail_domains(session, api_base, api_key, impersonate)
-    domain = domains[0]
+    domain = random.choice(domains)
+
+    with _print_lock:
+        print(f"[MoeMail] 选择邮箱后缀: {domain}")
 
     payload = {"name": email_local, "expiryTime": 86400000, "domain": domain}
     proxies = session._proxy_config if hasattr(session, '_proxy_config') else None
