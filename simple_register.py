@@ -546,6 +546,24 @@ def _extract_verification_code(content: str):
     return None
 
 
+def _mail_debug_summary(msg: Dict[str, Any]) -> str:
+    sender = msg.get("from") or msg.get("sender") or msg.get("fromAddress") or ""
+    if isinstance(sender, dict):
+        sender = sender.get("address") or sender.get("name") or json.dumps(sender, ensure_ascii=False)
+    sender = str(sender or "").strip() or "-"
+
+    subject = str(msg.get("subject") or "").strip() or "-"
+    if len(subject) > 120:
+        subject = f"{subject[:117]}..."
+
+    received_at = (
+        str(msg.get("createdAt") or msg.get("created_at") or msg.get("receivedAt") or msg.get("updatedAt") or "").strip()
+        or "-"
+    )
+    msg_id = str(msg.get("id") or msg.get("@id") or msg.get("messageId") or "").strip() or "-"
+    return f"id={msg_id} from={sender} subject={subject} at={received_at}"
+
+
 # ================= Sentinel Token =================
 class SentinelTokenGenerator:
     MAX_ATTEMPTS = 500000
@@ -1036,9 +1054,10 @@ class ChatGPTRegister:
         start_time = time.time()
         seen_ids = set()
         session = self._create_mail_session()
+        provider = str(mail_token.get("provider") or MAIL_PROVIDER or "moemail").strip().lower()
+        self._print(f"[OTP] 邮箱提供商: {provider}")
 
         while time.time() - start_time < timeout:
-            provider = str(mail_token.get("provider") or MAIL_PROVIDER or "moemail").strip().lower()
             if provider == "duckmail":
                 messages = _fetch_duckmail_messages(session, DUCKMAIL_API_BASE, mail_token, self.impersonate)
             else:
@@ -1049,6 +1068,8 @@ class ChatGPTRegister:
                     mail_token,
                     self.impersonate,
                 )
+            if messages:
+                self._print(f"[OTP] 本轮拉取到 {len(messages)} 封候选邮件")
             for msg in messages[:12]:
                 msg_id = str(msg.get("id") or msg.get("@id") or msg.get("messageId") or "").strip()
                 if msg_id and msg_id in seen_ids:
@@ -1070,12 +1091,17 @@ class ChatGPTRegister:
                     ),
                     json.dumps(msg, ensure_ascii=False),
                 ])
-                if "openai" not in content.lower():
-                    continue
                 code = _extract_verification_code(content)
                 if code:
+                    self._print(f"[OTP] 收到邮件: {_mail_debug_summary(msg)}")
                     self._print(f"[OTP] 验证码: {code}")
                     return code
+
+                lowered = content.lower()
+                if "openai" in lowered or "chatgpt" in lowered:
+                    self._print(f"[OTP] 收到候选邮件但未提取到验证码: {_mail_debug_summary(msg)}")
+                else:
+                    self._print(f"[OTP] 收到非 OpenAI 邮件: {_mail_debug_summary(msg)}")
 
             elapsed = int(time.time() - start_time)
             self._print(f"[OTP] 等待中... ({elapsed}s/{timeout}s)")
