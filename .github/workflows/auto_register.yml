@@ -19,7 +19,7 @@ on:
       max_workers:
         description: '并发线程数'
         required: false
-        default: '3'
+        default: '1'
       min_healthy:
         description: '最小健康账号数阈值'
         required: false
@@ -143,12 +143,25 @@ jobs:
           touch registered_accounts.txt
       - name: Register & Sync Accounts
         id: register
+        env:
+          PROXY: ${{ secrets.PROXY || vars.PROXY || '' }}
+          REGISTER_PROXY: ${{ secrets.REGISTER_PROXY || vars.REGISTER_PROXY || '' }}
+          STABLE_PROXY: ${{ secrets.STABLE_PROXY || vars.STABLE_PROXY || '' }}
         run: |
           echo "🚀 开始注册 ${REGISTER_COUNT} 个账号，并发数 ${REGISTER_MAX_WORKERS}..."
-          python simple_register.py \
+          register_proxy="${REGISTER_PROXY:-${PROXY:-${STABLE_PROXY:-}}}"
+          cmd=(python simple_register.py \
             -n "${REGISTER_COUNT}" \
             -w "${REGISTER_MAX_WORKERS}" \
-            -o registered_accounts.txt
+            -o registered_accounts.txt)
+          if [ -n "${register_proxy}" ]; then
+            cmd+=(-p "${register_proxy}")
+            echo "🔌 OpenAI proxy: set"
+          else
+            echo "🔌 OpenAI proxy: unset"
+          fi
+          "${cmd[@]}"
+          unset REGISTER_PROXY PROXY STABLE_PROXY register_proxy
           SUCCESS_COUNT=$(grep -c "oauth=ok" registered_accounts.txt || echo "0")
           echo "success_count=${SUCCESS_COUNT}" >> $GITHUB_OUTPUT
           echo "✅ 成功注册 ${SUCCESS_COUNT} 个账号"

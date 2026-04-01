@@ -70,7 +70,7 @@ class AccountSyncManager:
     """统一账号同步管理器"""
 
     def __init__(self):
-        self.session = curl_requests.Session(impersonate="chrome131")
+        self.session = curl_requests.Session(impersonate="chrome131", trust_env=False)
         config = _load_config()
 
         # D1 配置 (环境变量优先，config.json 作为备选)

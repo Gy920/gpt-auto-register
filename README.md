@@ -80,10 +80,10 @@
 | `cfmail_profile` | Variable | `CFMAIL_PROFILE` | 默认 `auto` |
 | `duckmail_api_base` | Secret 或 Variable | `DUCKMAIL_API_BASE` | 非敏感地址，放 Variable 更合理 |
 | `duckmail_bearer` | Secret | `DUCKMAIL_BEARER` | 邮箱服务鉴权，必须放 Secret |
-| `proxy` | 不建议在 GitHub 配置 | `PROXY` | `MODE=github` 下会被忽略 |
+| `proxy` | Secret（需要代理时） | `PROXY` | 注册流程和 `sub2api_reauth` 都可读取；`sub2api_reauth` 仅将其用于 OpenAI OAuth |
 | `proxy_list_url` | 不建议在 GitHub 配置 | `PROXY_LIST_URL` | `MODE=github` 下会被忽略 |
 | `proxy_list_bearer` | 不建议在 GitHub 配置 | `PROXY_LIST_BEARER` | `MODE=github` 下会被忽略 |
-| `proxy_validate_enabled` | 不需要 | `PROXY_VALIDATE_ENABLED` | `MODE=github` 下代理关闭，通常无效 |
+| `proxy_validate_enabled` | 不需要 | `PROXY_VALIDATE_ENABLED` | 主要用于本地代理池校验，GitHub 下通常无效 |
 | `proxy_validate_timeout_seconds` | 不需要 | `PROXY_VALIDATE_TIMEOUT_SECONDS` | 同上 |
 | `proxy_validate_workers` | 不需要 | `PROXY_VALIDATE_WORKERS` | 同上 |
 | `proxy_validate_test_url` | 不需要 | `PROXY_VALIDATE_TEST_URL` | 同上 |
@@ -91,7 +91,7 @@
 | `proxy_bad_ttl_seconds` | 不需要 | `PROXY_BAD_TTL_SECONDS` | 同上 |
 | `proxy_retry_attempts_per_account` | Variable | `PROXY_RETRY_ATTEMPTS_PER_ACCOUNT` | 代码仍会用到账户级重试次数，建议保留 |
 | `stable_proxy_file` | 不需要 | `STABLE_PROXY_FILE` | GitHub 临时环境，无持久意义 |
-| `stable_proxy` | 不建议在 GitHub 配置 | `STABLE_PROXY` | `MODE=github` 下会被忽略 |
+| `stable_proxy` | Secret（可选） | `STABLE_PROXY` | `PROXY` 的回退；`sub2api_reauth` 仅将其用于 OpenAI OAuth |
 | `prefer_stable_proxy` | 不需要 | `PREFER_STABLE_PROXY` | `MODE=github` 下无效 |
 | `output_file` | Variable | `REGISTER_OUTPUT_FILE` / `OUTPUT_FILE` | 默认即可，需要改输出文件名时再配 |
 | `enable_oauth` | Variable | `ENABLE_OAUTH` | 一般保持 `true` |
@@ -116,9 +116,9 @@
 | `auto_upload_sub2api` | Variable | `AUTO_UPLOAD_SUB2API` | 是否自动回传 Sub2Api |
 | `sub2api_group_ids` | Variable | `SUB2API_GROUP_IDS` | 多个值用逗号，如 `2,4` |
 | `sub2api_min_candidates` | Variable | `SUB2API_MIN_CANDIDATES` | Sub2Api 内部候选阈值 |
-| `sub2api_proxy_id` | Variable | `SUB2API_PROXY_ID` | GitHub 无代理模式下通常保留 `0` |
+| `sub2api_proxy_id` | Variable | `SUB2API_PROXY_ID` | `sub2api_reauth` 保留 server-side `proxy_id` 逻辑；无此需求时可保留 `0` |
 | `sub2api_proxy_name` | Variable | `SUB2API_PROXY_NAME` | 可留空 |
-| `sub2api_auto_assign_proxy` | Variable | `SUB2API_AUTO_ASSIGN_PROXY` | GitHub 无代理模式下通常设 `false` |
+| `sub2api_auto_assign_proxy` | Variable | `SUB2API_AUTO_ASSIGN_PROXY` | 通常设 `false`；仅在需要 Sub2Api server-side 自动分配代理时开启 |
 | `auto_upload_d1` | Variable | `AUTO_UPLOAD_D1` | 是否在同步到 CPA / Sub2Api 前先写入 D1 |
 | `d1_api_base_url` | Variable | `D1_API_BASE_URL` | D1 Worker API 地址，例如 `https://sub2api-d1-sync.<subdomain>.workers.dev` |
 | `d1_api_key` | Secret | `D1_API_KEY` | D1 Worker 的 Bearer 鉴权密钥，不要复用 Cloudflare 控制面 token |
@@ -147,16 +147,23 @@
 
 ### 建议不要直接从本地同步到 GitHub 的字段
 
-- 所有本地代理相关字段：`proxy`、`proxy_list_url`、`proxy_list_bearer`、`stable_proxy`
+- 代理池相关字段：`proxy_list_url`、`proxy_list_bearer`、`stable_proxy_file`
 - 本地运行产物路径如果没有特别需求，也不要自定义
 - `upload_api_url`、`upload_api_token` 这类可由其他字段推导出的字段，不必重复配置
 - `cloudflare_api_token`、`cloudflare_account_id` 只用于 Cloudflare 资源管理，不要把它们当成 D1 Worker 的业务侧鉴权
+
+### Sub2Api Reauth 代理说明
+
+- `update_auth.py` 会按 `PROXY` -> `STABLE_PROXY` -> `config.json.proxy` 的顺序解析原始代理。
+- 原始代理只用于 OpenAI/Auth OAuth 会话，不会用于 D1、DuckMail/MoeMail、Sub2Api 管理接口或 `/test` 校验。
+- `SUB2API_PROXY_ID` 仍只影响 Sub2Api server-side 的 `generate-auth-url` / `exchange-code`，与原始代理互不覆盖。
+- 代理 URL 通常包含鉴权信息，建议放在 GitHub Secret，而不是 Variable。
 
 ## Notes
 
 - 手动触发 workflow 时，可以填写 `manual_total_accounts` 强制指定本次注册数量
 - 定时触发时，会先检查 `sub2api` 数量，低于阈值才运行注册
-- 当前 GitHub Actions 运行模式固定为 `MODE=github`，不会使用本地代理或代理池配置
+- 当前 GitHub Actions 运行模式固定为 `MODE=github`。不会使用本地代理池配置；如需让注册流程或 `sub2api_reauth` 访问 OpenAI 时走单一代理，可配置 `PROXY` / `STABLE_PROXY`
 - 运维侧可以直接查询 D1：
   - `python sync_manager.py d1 --email foo@example.com`
   - `python sync_manager.py d1 --limit 50`

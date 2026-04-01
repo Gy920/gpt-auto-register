@@ -22,7 +22,7 @@ on:
       max_workers:
         description: Parallel worker count
         required: false
-        default: "3"
+        default: "1"
       cpa_cleanup:
         description: Run CPA cleanup before register (true/false)
         required: false
@@ -66,21 +66,6 @@ jobs:
       DUCKMAIL_BEARER: ${{ secrets.DUCKMAIL_BEARER }}
       CFMAIL_CONFIG_PATH: ${{ vars.CFMAIL_CONFIG_PATH || 'zhuce5_cfmail_accounts.json' }}
       CFMAIL_PROFILE: ${{ vars.CFMAIL_PROFILE || 'auto' }}
-
-      PROXY: ${{ secrets.PROXY }}
-      REGISTER_PROXY: ${{ secrets.REGISTER_PROXY }}
-      PROXY_LIST_URL: ${{ secrets.PROXY_LIST_URL }}
-      PROXY_LIST_BEARER: ${{ secrets.PROXY_LIST_BEARER }}
-      STABLE_PROXY: ${{ secrets.STABLE_PROXY }}
-      STABLE_PROXY_FILE: ${{ vars.STABLE_PROXY_FILE || 'stable_proxy.txt' }}
-      PREFER_STABLE_PROXY: ${{ vars.PREFER_STABLE_PROXY || 'true' }}
-      PROXY_VALIDATE_ENABLED: ${{ vars.PROXY_VALIDATE_ENABLED || 'true' }}
-      PROXY_VALIDATE_TIMEOUT_SECONDS: ${{ vars.PROXY_VALIDATE_TIMEOUT_SECONDS || '6' }}
-      PROXY_VALIDATE_WORKERS: ${{ vars.PROXY_VALIDATE_WORKERS || '40' }}
-      PROXY_VALIDATE_TEST_URL: ${{ vars.PROXY_VALIDATE_TEST_URL || 'https://auth.openai.com/' }}
-      PROXY_MAX_RETRIES_PER_REQUEST: ${{ vars.PROXY_MAX_RETRIES_PER_REQUEST || '30' }}
-      PROXY_BAD_TTL_SECONDS: ${{ vars.PROXY_BAD_TTL_SECONDS || '180' }}
-      PROXY_RETRY_ATTEMPTS_PER_ACCOUNT: ${{ vars.PROXY_RETRY_ATTEMPTS_PER_ACCOUNT || '20' }}
 
       ENABLE_OAUTH: ${{ vars.ENABLE_OAUTH || 'true' }}
       OAUTH_REQUIRED: ${{ vars.OAUTH_REQUIRED || 'true' }}
@@ -131,6 +116,10 @@ jobs:
           touch "${REGISTER_OUTPUT_FILE:-registered_accounts.txt}"
 
       - name: Check pool and run register when needed
+        env:
+          PROXY: ${{ secrets.PROXY || vars.PROXY || '' }}
+          REGISTER_PROXY: ${{ secrets.REGISTER_PROXY || vars.REGISTER_PROXY || '' }}
+          STABLE_PROXY: ${{ secrets.STABLE_PROXY || vars.STABLE_PROXY || '' }}
         run: python scripts/check_and_register.py
 
       - name: Upload run artifacts

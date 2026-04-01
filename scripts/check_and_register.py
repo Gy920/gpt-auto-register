@@ -79,32 +79,38 @@ def _fetch_sub2api_total(token: str) -> int:
         ]
 
     last_error = None
-    for headers in header_candidates:
-        try:
-            resp = cffi.get(
-                f"{base_url}/api/v1/admin/accounts",
-                params={"page": 1, "page_size": 1, "platform": "openai", "type": "oauth"},
-                headers=headers,
-                timeout=20,
-                impersonate="chrome131",
-            )
-
-            if resp.status_code in {401, 403} and len(header_candidates) > 1:
-                last_error = RuntimeError(f"auth rejected with status {resp.status_code}")
-                continue
-
-            resp.raise_for_status()
-            data = resp.json()
-            payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
-            if not isinstance(payload, dict):
-                payload = {}
-
+    session = cffi.Session(impersonate="chrome131", trust_env=False)
+    try:
+        for headers in header_candidates:
             try:
-                return int(payload.get("total", 0) or 0)
-            except Exception:
-                return 0
-        except Exception as exc:
-            last_error = exc
+                resp = session.get(
+                    f"{base_url}/api/v1/admin/accounts",
+                    params={"page": 1, "page_size": 1, "platform": "openai", "type": "oauth"},
+                    headers=headers,
+                    timeout=20,
+                )
+
+                if resp.status_code in {401, 403} and len(header_candidates) > 1:
+                    last_error = RuntimeError(f"auth rejected with status {resp.status_code}")
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+                if not isinstance(payload, dict):
+                    payload = {}
+
+                try:
+                    return int(payload.get("total", 0) or 0)
+                except Exception:
+                    return 0
+            except Exception as exc:
+                last_error = exc
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
     if last_error is not None:
         raise last_error

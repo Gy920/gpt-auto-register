@@ -23,7 +23,7 @@ python scripts/check_and_register.py
 
 ## Configuration
 
-Local config lives in `config.json` (gitignored). Copy from `config.example.json` and fill in values. In GitHub Actions (`MODE=github`), all config comes from environment variables mapped from GitHub Secrets/Variables — proxy settings are ignored in this mode.
+Local config lives in `config.json` (gitignored). Copy from `config.example.json` and fill in values. In GitHub Actions (`MODE=github`), all config comes from environment variables mapped from GitHub Secrets/Variables. Proxy pool settings remain local-only, but raw `PROXY` / `STABLE_PROXY` can still be used by registration and the reauth OpenAI OAuth flow.
 
 Key config fields:
 - `mail_provider`: `"duckmail"` or `"cfmail"`
@@ -46,7 +46,7 @@ Key config fields:
 ### Two Deployment Modes
 
 - **Local** (`mode: default`): Uses `config.json`, proxy pools enabled, web UI or scheduler for orchestration.
-- **GitHub Actions** (`MODE=github`): All config from env vars, proxies disabled, `scripts/check_and_register.py` is the entry point, runs on cron (`20 * * * *`) or manual dispatch.
+- **GitHub Actions** (`MODE=github`): All config from env vars. Proxy pools stay disabled, but raw `PROXY` / `STABLE_PROXY` can still be used where supported. `scripts/check_and_register.py` is the entry point, runs on cron (`20 * * * *`) or manual dispatch.
 
 ### Data Flow
 
