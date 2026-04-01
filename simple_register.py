@@ -1,5 +1,5 @@
 """
-ChatGPT 批量自动注册工具 (简化版) - 使用 MoeMail
+ChatGPT 批量自动注册工具 (简化版) - 支持 DuckMail / MoeMail
 本地运行使用 7890 端口代理，GitHub Action 中不使用代理
 依赖: pip install curl_cffi
 """
@@ -60,8 +60,8 @@ def _load_config():
     config = {
         "mode": "default",  # default 或 github
         "total_accounts": 3,
-        "mail_provider": "moemail",
-        "duckmail_api_base": "https://ai4mind.site",
+        "mail_provider": "duckmail",
+        "duckmail_api_base": "https://api.duckmail.sbs",
         "duckmail_bearer": "",
         "proxy": "http://127.0.0.1:7890",  # 本地代理
         "output_file": "registered_accounts.txt",
@@ -104,6 +104,7 @@ def _load_config():
 
     # 环��变量覆盖
     config["mode"] = os.environ.get("MODE", config.get("mode", "default"))
+    config["mail_provider"] = str(os.environ.get("MAIL_PROVIDER", config.get("mail_provider", "moemail"))).strip().lower()
     config["duckmail_api_base"] = os.environ.get("DUCKMAIL_API_BASE", config["duckmail_api_base"])
     config["duckmail_bearer"] = os.environ.get("DUCKMAIL_BEARER", config["duckmail_bearer"])
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
@@ -128,12 +129,24 @@ def _as_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _normalize_mail_provider(value, api_base: str = ""):
+    raw = str(value or "").strip().lower()
+    if raw in {"duckmail", "duck"}:
+        return "duckmail"
+    if raw in {"moemail", "moe"}:
+        return "moemail"
+    if "duckmail" in str(api_base or "").lower():
+        return "duckmail"
+    return "moemail"
+
+
 def _proxy_state(proxy: str = None) -> str:
     return "set" if str(proxy or "").strip() else "unset"
 
 
 _CONFIG = _load_config()
 MODE = _CONFIG.get("mode", "default")
+MAIL_PROVIDER = _normalize_mail_provider(_CONFIG.get("mail_provider", "moemail"), _CONFIG.get("duckmail_api_base"))
 DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
 DUCKMAIL_BEARER = _CONFIG["duckmail_bearer"]
 DEFAULT_PROXY = _CONFIG["proxy"]
@@ -213,6 +226,15 @@ def _mail_api_url(api_base: str, path: str):
     return f"{base}{rel}"
 
 
+def _mail_api_headers(api_key: str = "", auth_scheme: str = "x-api-key"):
+    key = str(api_key or "").strip()
+    if not key:
+        return {}
+    if auth_scheme == "bearer":
+        return {"Authorization": f"Bearer {key}"}
+    return {"X-API-Key": key}
+
+
 def _load_moemail_domains(session, api_base: str, api_key: str, impersonate: str):
     cache_key = str(api_base or "").rstrip("/")
     with _mail_domain_cache_lock:
@@ -221,7 +243,7 @@ def _load_moemail_domains(session, api_base: str, api_key: str, impersonate: str
             return list(cached)
 
     proxies = session._proxy_config if hasattr(session, '_proxy_config') else None
-    kwargs = {"headers": {"X-API-Key": api_key}, "timeout": 15}
+    kwargs = {"headers": _mail_api_headers(api_key), "timeout": 15}
     if impersonate:
         kwargs["impersonate"] = impersonate
     if proxies:
@@ -266,7 +288,7 @@ def _create_temp_email(session, api_base: str, api_key: str, impersonate: str = 
     payload = {"name": email_local, "expiryTime": 86400000, "domain": domain}
     proxies = session._proxy_config if hasattr(session, '_proxy_config') else None
 
-    kwargs = {"json": payload, "headers": {"X-API-Key": api_key}, "timeout": 15}
+    kwargs = {"json": payload, "headers": _mail_api_headers(api_key), "timeout": 15}
     if impersonate:
         kwargs["impersonate"] = impersonate
     if proxies:
@@ -293,7 +315,7 @@ def _fetch_mail_messages(session, api_base: str, api_key: str, mail_token, imper
     if not email_id:
         return []
     proxies = session._proxy_config if hasattr(session, '_proxy_config') else None
-    kwargs = {"headers": {"X-API-Key": api_key}, "timeout": 15}
+    kwargs = {"headers": _mail_api_headers(api_key), "timeout": 15}
     if impersonate:
         kwargs["impersonate"] = impersonate
     if proxies:
@@ -305,6 +327,203 @@ def _fetch_mail_messages(session, api_base: str, api_key: str, mail_token, imper
         inner = data.get("data") or {}
         return data.get("messages") or inner.get("messages") or data.get("items") or inner.get("items") or []
     return []
+
+
+def _load_duckmail_domains(session, api_base: str, api_key: str, impersonate: str):
+    cache_key = f"duckmail:{str(api_base or '').rstrip('/')}"
+    with _mail_domain_cache_lock:
+        cached = _mail_domain_cache.get(cache_key)
+        if cached:
+            return list(cached)
+
+    kwargs = {"timeout": 15}
+    if impersonate:
+        kwargs["impersonate"] = impersonate
+
+    headers = _mail_api_headers(api_key, auth_scheme="bearer")
+    if headers:
+        kwargs["headers"] = headers
+
+    domains = []
+    page = 1
+    while True:
+        res = session.get(_mail_api_url(api_base, "/domains"), params={"page": page}, **kwargs)
+        if res.status_code != 200:
+            raise Exception(f"获取 DuckMail 域名失败: {res.status_code} - {res.text[:200]}")
+
+        data = res.json()
+        raw_domains = []
+        if isinstance(data, dict):
+            raw_domains = data.get("hydra:member") or data.get("domains") or data.get("items") or []
+
+        if not raw_domains:
+            break
+
+        for item in raw_domains:
+            if isinstance(item, str):
+                value = item.strip()
+            elif isinstance(item, dict):
+                value = str(item.get("domain") or item.get("name") or "").strip()
+            else:
+                value = ""
+            if value:
+                domains.append(value)
+
+        if len(raw_domains) < 30:
+            break
+        page += 1
+
+    if not domains:
+        raise Exception("DuckMail 未返回可用邮箱域名")
+    domains = list(dict.fromkeys(domains))
+    with _mail_domain_cache_lock:
+        _mail_domain_cache[cache_key] = list(domains)
+    return domains
+
+
+def _duckmail_message_body(msg: Dict[str, Any]) -> str:
+    parts = [
+        str(msg.get("subject") or ""),
+        str(msg.get("intro") or ""),
+        str(msg.get("text") or msg.get("textAsHtml") or ""),
+        str(msg.get("html") or msg.get("htmlAsText") or ""),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _create_duckmail_email(session, api_base: str, api_key: str, impersonate: str = "chrome131"):
+    domains = _load_duckmail_domains(session, api_base, api_key, impersonate)
+    chars = string.ascii_lowercase + string.digits
+    for _ in range(5):
+        email_local = "".join(random.choice(chars) for _ in range(random.randint(8, 13)))
+        password = _generate_password(18)
+        email = f"{email_local}@{random.choice(domains)}"
+
+        create_kwargs = {
+            "json": {"address": email, "password": password, "expiresIn": 86400},
+            "headers": {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                **_mail_api_headers(api_key, auth_scheme="bearer"),
+            },
+            "timeout": 15,
+        }
+        if impersonate:
+            create_kwargs["impersonate"] = impersonate
+
+        res = session.post(_mail_api_url(api_base, "/accounts"), **create_kwargs)
+        if res.status_code == 409:
+            continue
+        if res.status_code not in [200, 201]:
+            raise Exception(f"创建 DuckMail 邮箱失败: {res.status_code} - {res.text[:200]}")
+
+        account_data = res.json()
+        email_id = str(account_data.get("id") or "").strip()
+
+        token_kwargs = {
+            "json": {"address": email, "password": password},
+            "headers": {"Content-Type": "application/json", "Accept": "application/json"},
+            "timeout": 15,
+        }
+        if impersonate:
+            token_kwargs["impersonate"] = impersonate
+
+        token_resp = session.post(_mail_api_url(api_base, "/token"), **token_kwargs)
+        if token_resp.status_code != 200:
+            raise Exception(f"获取 DuckMail Token 失败: {token_resp.status_code} - {token_resp.text[:200]}")
+
+        token_data = token_resp.json()
+        mailbox_token = str(token_data.get("token") or token_data.get("access_token") or "").strip()
+        if not mailbox_token:
+            raise Exception("DuckMail token 响应缺少 token")
+
+        return email, password, {
+            "provider": "duckmail",
+            "email": email,
+            "email_id": email_id or str(token_data.get("id") or "").strip(),
+            "password": password,
+            "mailbox_token": mailbox_token,
+            "api_key": api_key,
+        }
+
+    raise Exception("创建 DuckMail 邮箱失败: 多次尝试均发生地址冲突")
+
+
+def _fetch_duckmail_messages(session, api_base: str, mail_token, impersonate: str = "chrome131"):
+    mailbox_token = str(mail_token.get("mailbox_token", "") or "").strip()
+    if not mailbox_token:
+        return []
+
+    list_kwargs = {
+        "headers": {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {mailbox_token}",
+        },
+        "timeout": 15,
+    }
+    if impersonate:
+        list_kwargs["impersonate"] = impersonate
+
+    messages = []
+    page = 1
+    while True:
+        res = session.get(_mail_api_url(api_base, "/messages"), params={"page": page}, **list_kwargs)
+        if res.status_code != 200:
+            return messages
+
+        data = res.json()
+        raw_messages = []
+        if isinstance(data, dict):
+            raw_messages = data.get("hydra:member") or data.get("messages") or data.get("items") or []
+        if not raw_messages:
+            break
+
+        for item in raw_messages:
+            if not isinstance(item, dict):
+                continue
+            msg = dict(item)
+            if _extract_verification_code(_duckmail_message_body(msg)):
+                messages.append(msg)
+                continue
+
+            msg_ref = str(msg.get("@id") or msg.get("id") or "").strip()
+            if not msg_ref:
+                messages.append(msg)
+                continue
+
+            detail_path = msg_ref
+            if detail_path.startswith("http://") or detail_path.startswith("https://"):
+                detail_url = detail_path
+            else:
+                if not detail_path.startswith("/"):
+                    detail_path = f"/messages/{detail_path}"
+                detail_url = _mail_api_url(api_base, detail_path)
+
+            detail_kwargs = {
+                "headers": {
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {mailbox_token}",
+                },
+                "timeout": 15,
+            }
+            if impersonate:
+                detail_kwargs["impersonate"] = impersonate
+
+            detail_res = session.get(detail_url, **detail_kwargs)
+            if detail_res.status_code == 200:
+                try:
+                    detail_data = detail_res.json()
+                    if isinstance(detail_data, dict):
+                        msg.update(detail_data)
+                except Exception:
+                    pass
+            messages.append(msg)
+
+        if len(raw_messages) < 30:
+            break
+        page += 1
+
+    return messages
 
 
 def _extract_verification_code(content: str):
@@ -791,7 +1010,7 @@ class ChatGPTRegister:
                 return token
         raise Exception(f"{step_name} 的 sentinel token 获取失败")
 
-    # ==================== MoeMail ====================
+    # ==================== 邮箱服务 ====================
     def _create_mail_session(self):
         if self._mail_session is None:
             session = curl_requests.Session(impersonate=self.impersonate, trust_env=False)
@@ -808,6 +1027,8 @@ class ChatGPTRegister:
         if not DUCKMAIL_BEARER:
             raise Exception("DUCKMAIL_BEARER 未设置，无法创建临时邮箱")
         session = self._create_mail_session()
+        if MAIL_PROVIDER == "duckmail":
+            return _create_duckmail_email(session, DUCKMAIL_API_BASE, DUCKMAIL_BEARER, self.impersonate)
         return _create_temp_email(session, DUCKMAIL_API_BASE, DUCKMAIL_BEARER, self.impersonate)
 
     def wait_for_verification_email(self, mail_token: str, timeout: int = 120):
@@ -817,8 +1038,17 @@ class ChatGPTRegister:
         session = self._create_mail_session()
 
         while time.time() - start_time < timeout:
-            messages = _fetch_mail_messages(session, DUCKMAIL_API_BASE, mail_token.get("api_key", DUCKMAIL_BEARER),
-                                            mail_token, self.impersonate)
+            provider = str(mail_token.get("provider") or MAIL_PROVIDER or "moemail").strip().lower()
+            if provider == "duckmail":
+                messages = _fetch_duckmail_messages(session, DUCKMAIL_API_BASE, mail_token, self.impersonate)
+            else:
+                messages = _fetch_mail_messages(
+                    session,
+                    DUCKMAIL_API_BASE,
+                    mail_token.get("api_key", DUCKMAIL_BEARER),
+                    mail_token,
+                    self.impersonate,
+                )
             for msg in messages[:12]:
                 msg_id = str(msg.get("id") or msg.get("@id") or msg.get("messageId") or "").strip()
                 if msg_id and msg_id in seen_ids:
@@ -828,7 +1058,16 @@ class ChatGPTRegister:
 
                 content = "\n".join([
                     str(msg.get("subject") or ""),
-                    str(msg.get("text") or msg.get("content") or msg.get("html") or msg.get("body") or ""),
+                    str(
+                        msg.get("text")
+                        or msg.get("content")
+                        or msg.get("html")
+                        or msg.get("body")
+                        or msg.get("intro")
+                        or msg.get("textAsHtml")
+                        or msg.get("htmlAsText")
+                        or ""
+                    ),
                     json.dumps(msg, ensure_ascii=False),
                 ])
                 if "openai" not in content.lower():
@@ -1157,7 +1396,7 @@ class ChatGPTRegister:
 
 # ================= 批量注册 =================
 def _register_one(idx, total, proxy, output_file, force_ipv6=None):
-    provider = "moemail"
+    provider = MAIL_PROVIDER or "moemail"
     last_error = "unknown error"
 
     for attempt in range(1, 4):  # 最多 3 次尝试
@@ -1175,7 +1414,7 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
                 reg._print(f"[IPv6] 已启用")
 
             # 创建临时邮箱
-            reg._print(f"[MoeMail] 创建临时邮箱...")
+            reg._print(f"[{provider}] 创建临时邮箱...")
             if not DUCKMAIL_BEARER:
                 raise Exception("DUCKMAIL_BEARER 未设置")
             email, email_pwd, mail_token = reg.create_temp_email()
@@ -1301,7 +1540,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
         print(f"[IPv6] 已启用，本地地址: {ipv6_addr or '自动获取'}")
 
     print(f"\n{'#' * 60}")
-    print(f"  ChatGPT 批量自动注册 (MoeMail)")
+    print(f"  ChatGPT 批量自动注册 ({MAIL_PROVIDER})")
     print(f"  运行模式: {MODE}")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
     print(f"  代理: {_proxy_state(actual_proxy)}")

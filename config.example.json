@@ -1,8 +1,8 @@
 {
   "mode": "default",
   "total_accounts": 3,
-  "mail_provider": "moemail",
-  "duckmail_api_base": "https://mail.example.com",
+  "mail_provider": "duckmail",
+  "duckmail_api_base": "https://api.duckmail.sbs",
   "duckmail_bearer": "",
   "proxy": "http://127.0.0.1:7890",
   "output_file": "registered_accounts.txt",

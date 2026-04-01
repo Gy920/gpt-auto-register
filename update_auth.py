@@ -24,7 +24,7 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -58,7 +58,7 @@ _PRINT_LOCK = Lock()
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _log(message: str, *, account_id: Optional[int] = None, email: str = "", stage: str = "") -> None:
@@ -86,6 +86,17 @@ def _normalize_email(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def _normalize_mail_provider(value: str, api_base: str = "") -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"duckmail", "duck"}:
+        return "duckmail"
+    if raw in {"moemail", "moe"}:
+        return "moemail"
+    if "duckmail" in str(api_base or "").lower():
+        return "duckmail"
+    return "moemail"
+
+
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -103,6 +114,7 @@ def _load_config(config_path: str) -> Dict[str, Any]:
         "SUB2API_BEARER": "sub2api_bearer",
         "SUB2API_EMAIL": "sub2api_email",
         "SUB2API_PASSWORD": "sub2api_password",
+        "MAIL_PROVIDER": "mail_provider",
         "DUCKMAIL_API_BASE": "duckmail_api_base",
         "DUCKMAIL_BEARER": "duckmail_bearer",
         "D1_API_BASE_URL": "d1_api_base_url",
@@ -486,7 +498,7 @@ class Sub2ApiAdminClient:
         creds["access_token"] = access_token
         if expires_at_raw:
             expires_at_ts = int(expires_at_raw)
-            creds["expires_at"] = datetime.fromtimestamp(expires_at_ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            creds["expires_at"] = datetime.fromtimestamp(expires_at_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if refresh_token:
             creds["refresh_token"] = refresh_token
         if id_token:
@@ -531,14 +543,22 @@ class MoeMailClient:
     def __init__(self, config: Dict[str, Any]):
         self.api_base = str(config.get("duckmail_api_base", "")).strip().rstrip("/")
         self.api_key = str(config.get("duckmail_bearer", "")).strip()
+        self.provider = _normalize_mail_provider(config.get("mail_provider", ""), self.api_base)
         self.session = curl_requests.Session(impersonate="chrome131", trust_env=False)
         if not self.api_base or not self.api_key:
             raise ValueError("DuckMail/MoeMail is not configured: duckmail_api_base and duckmail_bearer are required")
 
     def _headers(self) -> Dict[str, str]:
+        if self.provider == "duckmail":
+            return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
         return {"X-API-Key": self.api_key, "Accept": "application/json"}
 
+    def _mailbox_headers(self, mailbox_token: str) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {mailbox_token}", "Accept": "application/json"}
+
     def _list_emails_page(self, cursor: str = "") -> Dict[str, Any]:
+        if self.provider == "duckmail":
+            raise RuntimeError("DuckMail does not support listing all mailboxes via API key")
         params = {"cursor": cursor} if cursor else None
         resp = self.session.get(
             _mail_api_url(self.api_base, "/api/emails"),
@@ -550,6 +570,8 @@ class MoeMailClient:
         return resp.json()
 
     def list_emails(self) -> List[Dict[str, Any]]:
+        if self.provider == "duckmail":
+            raise RuntimeError("DuckMail does not support listing all mailboxes via API key")
         items: List[Dict[str, Any]] = []
         cursor = ""
         seen_cursors: Set[str] = set()
@@ -566,6 +588,8 @@ class MoeMailClient:
         return items
 
     def find_email(self, email: str) -> Optional[Dict[str, Any]]:
+        if self.provider == "duckmail":
+            raise RuntimeError("DuckMail mailbox lookup requires the mailbox password")
         target = _normalize_email(email)
         cursor = ""
         seen_cursors: Set[str] = set()
@@ -582,8 +606,51 @@ class MoeMailClient:
             cursor = next_cursor
         return None
 
-    def create_same_email(self, email: str) -> Dict[str, Any]:
+    def _duckmail_get_mailbox(self, email: str, password: str) -> Dict[str, Any]:
+        resp = self.session.post(
+            _mail_api_url(self.api_base, "/token"),
+            json={"address": email, "password": password},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Failed to login DuckMail mailbox: {resp.status_code} - {resp.text[:200]}")
+        data = resp.json()
+        mailbox_token = str(data.get("token") or data.get("access_token") or "").strip()
+        if not mailbox_token:
+            raise RuntimeError("DuckMail token response is missing token")
+
+        me_resp = self.session.get(
+            _mail_api_url(self.api_base, "/me"),
+            headers=self._mailbox_headers(mailbox_token),
+            timeout=15,
+        )
+        me_resp.raise_for_status()
+        me = me_resp.json()
+        return {
+            "id": str(me.get("id") or data.get("id") or "").strip(),
+            "address": str(me.get("address") or email).strip(),
+            "mailbox_token": mailbox_token,
+        }
+
+    def create_same_email(self, email: str, password: str) -> Dict[str, Any]:
         local_part, domain = _normalize_email(email).split("@", 1)
+        if self.provider == "duckmail":
+            resp = self.session.post(
+                _mail_api_url(self.api_base, "/accounts"),
+                json={"address": email, "password": password, "expiresIn": 86400},
+                headers={**self._headers(), "Content-Type": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code == 409:
+                return self._duckmail_get_mailbox(email, password)
+            if resp.status_code not in (200, 201):
+                raise RuntimeError(f"Failed to recreate mailbox: {resp.status_code} - {resp.text[:200]}")
+            mailbox = self._duckmail_get_mailbox(email, password)
+            if mailbox.get("id") and _normalize_email(mailbox.get("address")) == _normalize_email(email):
+                return mailbox
+            raise RuntimeError("Mailbox was recreated but account metadata could not be confirmed")
+
         resp = self.session.post(
             _mail_api_url(self.api_base, "/api/emails/generate"),
             json={"name": local_part, "expiryTime": 86400000, "domain": domain},
@@ -609,16 +676,37 @@ class MoeMailClient:
             return matched
         raise RuntimeError("Mailbox was recreated but email_id could not be confirmed")
 
-    def ensure_email(self, email: str) -> Dict[str, Any]:
+    def ensure_email(self, email: str, password: str = "") -> Dict[str, Any]:
+        if self.provider == "duckmail":
+            if not password:
+                raise RuntimeError("DuckMail mailbox lookup requires the mailbox password")
+            try:
+                item = self._duckmail_get_mailbox(email, password)
+                item["_recreated"] = False
+                return item
+            except Exception:
+                item = self.create_same_email(email, password)
+                item["_recreated"] = True
+                return item
+
         item = self.find_email(email)
         if item:
             item["_recreated"] = False
             return item
-        item = self.create_same_email(email)
+        item = self.create_same_email(email, password)
         item["_recreated"] = True
         return item
 
-    def fetch_email_detail(self, email_id: str) -> Dict[str, Any]:
+    def fetch_email_detail(self, email_id: str, mailbox_token: str = "") -> Dict[str, Any]:
+        if self.provider == "duckmail":
+            resp = self.session.get(
+                _mail_api_url(self.api_base, f"/messages/{email_id}"),
+                headers=self._mailbox_headers(mailbox_token),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
         resp = self.session.get(
             _mail_api_url(self.api_base, f"/api/emails/{email_id}"),
             headers=self._headers(),
@@ -627,7 +715,33 @@ class MoeMailClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_message_ids(self, email_id: str) -> Set[str]:
+    def get_message_ids(self, email_id: str, mailbox_token: str = "") -> Set[str]:
+        if self.provider == "duckmail":
+            ids: Set[str] = set()
+            page = 1
+            while True:
+                resp = self.session.get(
+                    _mail_api_url(self.api_base, "/messages"),
+                    params={"page": page},
+                    headers=self._mailbox_headers(mailbox_token),
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                messages = data.get("hydra:member") or []
+                if not isinstance(messages, list) or not messages:
+                    break
+                for msg in messages:
+                    if not isinstance(msg, dict):
+                        continue
+                    msg_id = str(msg.get("id") or msg.get("@id") or "").strip()
+                    if msg_id:
+                        ids.add(msg_id)
+                if len(messages) < 30:
+                    break
+                page += 1
+            return ids
+
         detail = self.fetch_email_detail(email_id)
         messages = detail.get("messages") or detail.get("items") or []
         ids: Set[str] = set()
@@ -646,6 +760,7 @@ class MoeMailClient:
         timeout: int = 480,
         account_id: Optional[int] = None,
         email: str = "",
+        mailbox_token: str = "",
     ) -> str:
         deadline = time.time() + timeout
         seen = set(baseline_ids)
@@ -659,7 +774,16 @@ class MoeMailClient:
         )
 
         while time.time() < deadline:
-            detail = self.fetch_email_detail(email_id)
+            if self.provider == "duckmail":
+                resp = self.session.get(
+                    _mail_api_url(self.api_base, "/messages"),
+                    headers=self._mailbox_headers(mailbox_token),
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                detail = {"messages": resp.json().get("hydra:member") or []}
+            else:
+                detail = self.fetch_email_detail(email_id)
             messages = detail.get("messages") or detail.get("items") or []
             for msg in messages:
                 if not isinstance(msg, dict):
@@ -669,6 +793,8 @@ class MoeMailClient:
                     continue
                 if msg_id:
                     seen.add(msg_id)
+                if self.provider == "duckmail" and msg_id:
+                    msg = self.fetch_email_detail(msg_id, mailbox_token=mailbox_token)
                 content = "\n".join([
                     str(msg.get("subject") or ""),
                     str(msg.get("content") or ""),
@@ -1011,7 +1137,7 @@ class OAuthRunner:
 
     def run(self, mail_timeout: int, account_id: Optional[int] = None) -> Dict[str, Any]:
         _log("Ensuring mailbox", account_id=account_id, email=self.email, stage="oauth")
-        mailbox = self.mail_client.ensure_email(self.email)
+        mailbox = self.mail_client.ensure_email(self.email, self.password)
         email_id = str(mailbox.get("id") or "").strip()
         if not email_id:
             raise RuntimeError("DuckMail mailbox is missing email_id")
@@ -1021,7 +1147,8 @@ class OAuthRunner:
             email=self.email,
             stage="oauth",
         )
-        baseline_ids = self.mail_client.get_message_ids(email_id)
+        mailbox_token = str(mailbox.get("mailbox_token") or "").strip()
+        baseline_ids = self.mail_client.get_message_ids(email_id, mailbox_token=mailbox_token)
 
         _log("Bootstrapping OAuth session", account_id=account_id, email=self.email, stage="oauth")
         has_login_session, authorize_final_url = self._bootstrap_oauth_session()
@@ -1122,6 +1249,7 @@ class OAuthRunner:
                 timeout=mail_timeout,
                 account_id=account_id,
                 email=self.email,
+                mailbox_token=mailbox_token,
             )
             headers_otp = self._oauth_json_headers(f"{self.oauth_issuer}/email-verification")
             _log("Submitting email OTP", account_id=account_id, email=self.email, stage="oauth")
