@@ -1,0 +1,192 @@
+name: Sub2Api Reauth
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Detect only, do not perform OAuth or account updates"
+        required: false
+        default: false
+        type: boolean
+      max_workers:
+        description: "Full pipeline concurrency"
+        required: false
+        default: "5"
+      page_size:
+        description: "Account page size"
+        required: false
+        default: "100"
+  schedule:
+    - cron: "0 */8 * * *"
+
+concurrency:
+  group: sub2api-reauth
+  cancel-in-progress: false
+
+jobs:
+  reauth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      MODE: "github"
+
+      SUB2API_BASE_URL: ${{ secrets.SUB2API_BASE_URL }}
+      SUB2API_BEARER: ${{ secrets.SUB2API_BEARER }}
+      SUB2API_EMAIL: ${{ secrets.SUB2API_EMAIL }}
+      SUB2API_PASSWORD: ${{ secrets.SUB2API_PASSWORD }}
+
+      DUCKMAIL_API_BASE: ${{ secrets.DUCKMAIL_API_BASE }}
+      DUCKMAIL_BEARER: ${{ secrets.DUCKMAIL_BEARER }}
+
+      D1_API_BASE_URL: ${{ vars.D1_API_BASE_URL || secrets.D1_API_BASE_URL || '' }}
+      D1_API_KEY: ${{ secrets.D1_API_KEY }}
+
+      OAUTH_REDIRECT_URI: ${{ vars.OAUTH_REDIRECT_URI || 'http://localhost:1455/auth/callback' }}
+      SUB2API_PROXY_ID: ${{ vars.SUB2API_PROXY_ID || '0' }}
+
+      UPDATE_AUTH_MAX_WORKERS: ${{ github.event.inputs.max_workers || vars.UPDATE_AUTH_MAX_WORKERS || '5' }}
+      UPDATE_AUTH_PAGE_SIZE: ${{ github.event.inputs.page_size || vars.UPDATE_AUTH_PAGE_SIZE || '100' }}
+      UPDATE_AUTH_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Prepare logs directory
+        run: mkdir -p logs
+
+      - name: Run Sub2Api reauth
+        shell: bash
+        run: |
+          cmd=(python update_auth.py \
+            --max-workers "${UPDATE_AUTH_MAX_WORKERS}" \
+            --page-size "${UPDATE_AUTH_PAGE_SIZE}" \
+            --output logs/update_auth.json)
+
+          if [ "${UPDATE_AUTH_DRY_RUN}" = "true" ]; then
+            cmd+=(--dry-run)
+          fi
+
+          "${cmd[@]}"
+
+      - name: Upload reauth artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sub2api-reauth-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: logs/update_auth.json
+
+      - name: Write summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          result_path = Path("logs/update_auth.json")
+
+          def clean_text(value: object, limit: int = 160) -> str:
+              text = str(value or "").replace("\n", " ").replace("\r", " ").replace("|", "\\|").strip()
+              if len(text) > limit:
+                  return text[: limit - 3] + "..."
+              return text
+
+          def item_status(item: dict) -> str:
+              status = str(item.get("status") or "").strip()
+              if status:
+                  return status
+              if item.get("post_update_verified") is True:
+                  return "updated"
+              if item.get("error"):
+                  return "failed"
+              if item.get("callback_url"):
+                  return "updated"
+              if item.get("auth_url") or item.get("session_id"):
+                  return "candidate"
+              return "unknown"
+
+          lines = ["## Sub2Api Reauth", ""]
+          if not result_path.exists():
+              lines.append("- Result: no output generated")
+          else:
+              data = json.loads(result_path.read_text(encoding="utf-8"))
+              if isinstance(data, list):
+                  items = data
+                  tested_count = len(items)
+                  candidate_count = len(items)
+                  success_count = sum(1 for item in items if item_status(item) == "updated")
+                  failed_count = sum(1 for item in items if item_status(item) == "failed")
+                  skipped_count = sum(1 for item in items if item_status(item) == "skipped")
+              else:
+                  items = data.get("items") or []
+                  tested_count = data.get("tested_count")
+                  candidate_count = data.get("reauth_candidate_count")
+                  success_count = data.get("success_count")
+                  failed_count = data.get("failed_count")
+                  skipped_count = data.get("skipped_count")
+                  if tested_count is None:
+                      tested_count = len(items)
+                  if candidate_count is None:
+                      candidate_count = len(items)
+                  if success_count is None:
+                      success_count = sum(1 for item in items if item_status(item) == "updated")
+                  if failed_count is None:
+                      failed_count = sum(1 for item in items if item_status(item) == "failed")
+                  if skipped_count is None:
+                      skipped_count = sum(1 for item in items if item_status(item) == "skipped")
+
+              lines.extend([
+                  "| Metric | Value |",
+                  "| --- | ---: |",
+                  f"| Tested | {tested_count} |",
+                  f"| Reauth candidates | {candidate_count} |",
+                  f"| Success | {success_count} |",
+                  f"| Failed | {failed_count} |",
+                  f"| Skipped | {skipped_count} |",
+                  "",
+              ])
+
+              if items:
+                  lines.extend([
+                      "### Reauth Results",
+                      "",
+                      "| Account ID | Email | Status | Verified | Error |",
+                      "| ---: | --- | --- | --- | --- |",
+                  ])
+                  for item in items:
+                      verified = item.get("post_update_verified")
+                      status = item_status(item)
+                      if verified is True:
+                          verified_text = "yes"
+                      elif verified is False:
+                          verified_text = "no"
+                      else:
+                          verified_text = ""
+                      lines.append(
+                          "| {account_id} | {email} | {status} | {verified} | {error} |".format(
+                              account_id=item.get("account_id", ""),
+                              email=clean_text(item.get("email", ""), limit=80),
+                              status=clean_text(status, limit=32),
+                              verified=verified_text,
+                              error=clean_text(item.get("error") or item.get("test_error") or "", limit=160),
+                          )
+                      )
+              else:
+                  lines.append("- No reauth candidates")
+
+          summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
