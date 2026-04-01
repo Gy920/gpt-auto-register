@@ -1489,7 +1489,6 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
                                     reg._print("[Sync] ❌ Sub2Api 上传失败")
                         except Exception as sync_e:
                             reg._print(f"[Sync] ❌ 同步异常: {sync_e}")
-                            import traceback
                             traceback.print_exc()
                 else:
                     msg = "OAuth 获取失败"
