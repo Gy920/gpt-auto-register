@@ -52,6 +52,8 @@ REAUTH_KEYWORDS = (
     "重新登录",
 )
 
+PHONE_VERIFICATION_ERROR = "OpenAI requires phone verification for this account"
+
 _PRINT_LOCK = Lock()
 
 
@@ -117,6 +119,31 @@ def _load_config(config_path: str) -> Dict[str, Any]:
         config["oauth_redirect_uri"] = "http://localhost:1455/auth/callback"
 
     return config
+
+
+def _resolve_openai_proxy(config: Dict[str, Any]) -> Tuple[Optional[str], str]:
+    candidates = (
+        ("PROXY", os.getenv("PROXY")),
+        ("STABLE_PROXY", os.getenv("STABLE_PROXY")),
+        ("config.json proxy", config.get("proxy")),
+    )
+    for source, raw_value in candidates:
+        proxy = str(raw_value or "").strip()
+        if proxy:
+            return proxy, source
+    return None, ""
+
+
+def _describe_proxy_state(proxy: Optional[str], source: str = "") -> str:
+    if not proxy:
+        return "unset"
+    if source:
+        return f"set via {source}"
+    return "set"
+
+
+def _is_phone_verification_error(value: object) -> bool:
+    return str(value or "").strip() == PHONE_VERIFICATION_ERROR
 
 
 def _resolve_sub2api_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,7 +221,7 @@ class D1PasswordClient:
     def __init__(self, config: Dict[str, Any]):
         self.base_url = str(config.get("d1_api_base_url", "")).strip().rstrip("/")
         self.api_key = str(config.get("d1_api_key", "")).strip()
-        self.session = curl_requests.Session(impersonate="chrome131")
+        self.session = curl_requests.Session(impersonate="chrome131", trust_env=False)
         if not self.base_url or not self.api_key:
             raise ValueError("D1 is not configured: d1_api_base_url and d1_api_key are required")
 
@@ -223,7 +250,7 @@ class Sub2ApiAdminClient:
         self.admin_email = str(config.get("sub2api_email", "")).strip()
         self.admin_password = str(config.get("sub2api_password", "")).strip()
         self.admin_bearer = str(config.get("sub2api_bearer", "")).strip()
-        self.session = curl_requests.Session(impersonate="chrome131")
+        self.session = curl_requests.Session(impersonate="chrome131", trust_env=False)
         self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -490,12 +517,21 @@ class Sub2ApiAdminClient:
             raise RuntimeError(f"Failed to update account: {resp.status_code} - {resp.text[:500]}")
         return resp.json().get("data") or {}
 
+    def delete_account(self, account_id: int) -> None:
+        resp = self.session.delete(
+            f"{self.base_url}/api/v1/admin/accounts/{account_id}",
+            headers=self._headers(),
+            timeout=60,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Failed to delete account: {resp.status_code} - {resp.text[:500]}")
+
 
 class MoeMailClient:
     def __init__(self, config: Dict[str, Any]):
         self.api_base = str(config.get("duckmail_api_base", "")).strip().rstrip("/")
         self.api_key = str(config.get("duckmail_bearer", "")).strip()
-        self.session = curl_requests.Session(impersonate="chrome131")
+        self.session = curl_requests.Session(impersonate="chrome131", trust_env=False)
         if not self.api_base or not self.api_key:
             raise ValueError("DuckMail/MoeMail is not configured: duckmail_api_base and duckmail_bearer are required")
 
@@ -657,7 +693,15 @@ class MoeMailClient:
 
 
 class OAuthRunner:
-    def __init__(self, auth_url: str, redirect_uri: str, email: str, password: str, mail_client: MoeMailClient):
+    def __init__(
+        self,
+        auth_url: str,
+        redirect_uri: str,
+        email: str,
+        password: str,
+        mail_client: MoeMailClient,
+        proxy: Optional[str] = None,
+    ):
         self.auth_url = auth_url.strip()
         self.redirect_uri = redirect_uri.strip()
         self.email = _normalize_email(email)
@@ -665,7 +709,13 @@ class OAuthRunner:
         self.mail_client = mail_client
         self.device_id = str(uuid.uuid4())
         self.impersonate, _, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
-        self.session = curl_requests.Session(impersonate=self.impersonate)
+        self.proxy = str(proxy or "").strip() or None
+        self.proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+        self.session = curl_requests.Session(
+            impersonate=self.impersonate,
+            trust_env=False,
+            proxies=self.proxies,
+        )
         self.session.headers.update({
             "User-Agent": self.ua,
             "Accept-Language": random.choice(["en-US,en;q=0.9", "en-US,en;q=0.9,zh-CN;q=0.8"]),
@@ -1097,7 +1147,7 @@ class OAuthRunner:
 
         if page_type == "add_phone" or "add-phone" in (continue_url or ""):
             _log("OpenAI requires phone verification", account_id=account_id, email=self.email, stage="oauth")
-            raise RuntimeError("OpenAI requires phone verification for this account")
+            raise RuntimeError(PHONE_VERIFICATION_ERROR)
 
         callback_url = None
         consent_url = continue_url
@@ -1157,12 +1207,14 @@ def _process_account(
     config: Dict[str, Any],
     redirect_uri: str,
     default_proxy_id: Optional[int],
+    openai_proxy: Optional[str],
     dry_run: bool,
     mail_timeout: int,
     verify_after_update: bool,
 ) -> Dict[str, Any]:
     raw_account_id = account.get("id")
     email = _normalize_email(account.get("email"))
+    admin: Optional[Sub2ApiAdminClient] = None
     item: Dict[str, Any] = {
         "candidate": True,
         "account_id": raw_account_id,
@@ -1220,12 +1272,19 @@ def _process_account(
         password = D1PasswordClient(config).get_password(email)
         _log("Password fetched from D1", account_id=account_id, email=email, stage="account")
         mail_client = MoeMailClient(config)
+        _log(
+            f"Starting OpenAI OAuth flow (proxy={'set' if openai_proxy else 'unset'})",
+            account_id=account_id,
+            email=email,
+            stage="oauth",
+        )
         oauth_result = OAuthRunner(
             auth_url=item["auth_url"],
             redirect_uri=item["redirect_uri"],
             email=email,
             password=password,
             mail_client=mail_client,
+            proxy=openai_proxy,
         ).run(mail_timeout=max(30, mail_timeout), account_id=account_id)
         item["callback_url"] = oauth_result.get("callback_url")
 
@@ -1257,12 +1316,49 @@ def _process_account(
         _log("Reauth completed successfully", account_id=account_id, email=email, stage="account")
         return item
     except Exception as exc:
+        error_text = str(exc).strip()
         if not item["test_error"]:
-            item["test_error"] = str(exc)
-        item["error"] = str(exc)
+            item["test_error"] = error_text
+        item["error"] = error_text
         item["status"] = "failed"
         log_account_id = item["account_id"] if isinstance(item.get("account_id"), int) else None
-        _log(f"Reauth failed: {exc}", account_id=log_account_id, email=email, stage="account")
+
+        if (
+            not dry_run
+            and admin is not None
+            and log_account_id is not None
+            and _is_phone_verification_error(error_text)
+        ):
+            try:
+                admin.delete_account(log_account_id)
+                item["status"] = "removed"
+                item["post_update_verified"] = None
+                _log(
+                    "Phone verification required, account removed from Sub2Api",
+                    account_id=log_account_id,
+                    email=email,
+                    stage="account",
+                )
+            except Exception as delete_exc:
+                delete_error = f"{error_text} | delete_failed={delete_exc}"
+                item["error"] = delete_error
+                item["status"] = "failed"
+                _log(
+                    f"Phone verification required but failed to remove account: {delete_exc}",
+                    account_id=log_account_id,
+                    email=email,
+                    stage="account",
+                )
+
+        if item["status"] == "removed":
+            _log(
+                f"Reauth removed account after phone verification requirement: {error_text}",
+                account_id=log_account_id,
+                email=email,
+                stage="account",
+            )
+        else:
+            _log(f"Reauth failed: {exc}", account_id=log_account_id, email=email, stage="account")
         return item
 
 
@@ -1283,6 +1379,7 @@ def main() -> int:
 
     config = _load_config(args.config)
     redirect_uri = str(args.redirect_uri or config.get("oauth_redirect_uri") or "").strip()
+    openai_proxy, openai_proxy_source = _resolve_openai_proxy(config)
     default_proxy_id: Optional[int] = args.default_proxy_id
     if default_proxy_id is None:
         raw_proxy_id = config.get("sub2api_proxy_id")
@@ -1291,6 +1388,10 @@ def main() -> int:
 
     resolved_config = _resolve_sub2api_runtime_config(config)
     admin = Sub2ApiAdminClient(resolved_config)
+    _log(
+        f"Resolved OpenAI OAuth proxy: {_describe_proxy_state(openai_proxy, openai_proxy_source)}",
+        stage="main",
+    )
     _log(
         f"Starting run platform={args.platform} status={args.status} page_size={max(1, args.page_size)} max_workers={max(1, args.max_workers)} dry_run={args.dry_run}",
         stage="main",
@@ -1307,6 +1408,7 @@ def main() -> int:
     candidate_count = 0
     success_count = 0
     failed_count = 0
+    removed_count = 0
     skipped_count = 0
     completed_count = 0
 
@@ -1318,6 +1420,7 @@ def main() -> int:
                 resolved_config,
                 redirect_uri,
                 default_proxy_id,
+                openai_proxy,
                 args.dry_run,
                 args.mail_timeout,
                 not args.skip_post_verify,
@@ -1352,7 +1455,7 @@ def main() -> int:
             if not result.get("candidate"):
                 skipped_count += 1
                 _log(
-                    f"Progress {completed_count}/{tested_count} | candidates={candidate_count} success={success_count} failed={failed_count} skipped={skipped_count}",
+                    f"Progress {completed_count}/{tested_count} | candidates={candidate_count} success={success_count} failed={failed_count} removed={removed_count} skipped={skipped_count}",
                     stage="main",
                 )
                 continue
@@ -1374,13 +1477,15 @@ def main() -> int:
 
             if item["status"] == "updated":
                 success_count += 1
+            elif item["status"] == "removed":
+                removed_count += 1
             elif item["status"] == "failed":
                 failed_count += 1
             else:
                 skipped_count += 1
 
             _log(
-                f"Progress {completed_count}/{tested_count} | candidates={candidate_count} success={success_count} failed={failed_count} skipped={skipped_count}",
+                f"Progress {completed_count}/{tested_count} | candidates={candidate_count} success={success_count} failed={failed_count} removed={removed_count} skipped={skipped_count}",
                 stage="main",
             )
 
@@ -1392,6 +1497,7 @@ def main() -> int:
         "reauth_candidate_count": candidate_count,
         "success_count": success_count,
         "failed_count": failed_count,
+        "removed_count": removed_count,
         "skipped_count": skipped_count,
         "items": sorted(items, key=lambda item: (item.get("status") != "updated", item.get("account_id") or 0)),
     }
@@ -1403,6 +1509,7 @@ def main() -> int:
     print(f"[update_auth] candidates={candidate_count}")
     print(f"[update_auth] success={success_count}")
     print(f"[update_auth] failed={failed_count}")
+    print(f"[update_auth] removed={removed_count}")
     print(f"[update_auth] skipped={skipped_count}")
     print(f"[update_auth] wrote={args.output}")
     return 0

@@ -128,6 +128,10 @@ def _as_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _proxy_state(proxy: str = None) -> str:
+    return "set" if str(proxy or "").strip() else "unset"
+
+
 _CONFIG = _load_config()
 MODE = _CONFIG.get("mode", "default")
 DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
@@ -661,8 +665,12 @@ class ChatGPTRegister:
         self.proxy = proxy.strip() if proxy and proxy.strip() else None
         self.proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
 
-        # 创建 session
-        self.session = curl_requests.Session(impersonate=self.impersonate)
+        # OpenAI/Auth 会话允许使用原始代理，避免其他非 OpenAI 流量复用。
+        self.session = curl_requests.Session(
+            impersonate=self.impersonate,
+            trust_env=False,
+            proxies=self.proxies,
+        )
         self.session._proxy_config = self.proxies
 
         # 配置 IPv6（强制使用 IPv6 进行连接）
@@ -786,13 +794,13 @@ class ChatGPTRegister:
     # ==================== MoeMail ====================
     def _create_mail_session(self):
         if self._mail_session is None:
-            session = curl_requests.Session()
-            session._proxy_config = self.proxies
+            session = curl_requests.Session(impersonate=self.impersonate, trust_env=False)
             session.headers.update({
                 "User-Agent": self.ua,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             })
+            session._proxy_config = None
             self._mail_session = session
         return self._mail_session
 
@@ -1157,12 +1165,12 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
             return False, None, "已手动停止"
 
         reg = None
-        proxy_label = proxy or "direct"
+        proxy_state = _proxy_state(proxy)
         use_ipv6 = force_ipv6 if force_ipv6 is not None else FORCE_IPV6
 
         try:
             reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}-try{attempt}", force_ipv6=use_ipv6)
-            reg._print(f"[Proxy] 尝试 {attempt}/3: {proxy_label}")
+            reg._print(f"[Proxy] 尝试 {attempt}/3: proxy={proxy_state}")
             if use_ipv6:
                 reg._print(f"[IPv6] 已启用")
 
@@ -1184,7 +1192,7 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
                 print(f"  [{idx}/{total}] 注册: {email}")
                 print(f"  ChatGPT密码: {chatgpt_password}")
                 print(f"  姓名: {name} | 生日: {birthdate}")
-                print(f"  代理: {proxy_label}")
+                print(f"  代理: {proxy_state}")
                 print(f"{'=' * 60}")
 
             # 执行注册
@@ -1253,17 +1261,17 @@ def _register_one(idx, total, proxy, output_file, force_ipv6=None):
             # 保存结果
             with _file_lock:
                 with open(output_file, "a", encoding="utf-8") as out:
-                    line = f"{email}----{chatgpt_password}----oauth={'ok' if oauth_ok else 'fail'}----proxy={proxy_label}\n"
+                    line = f"{email}----{chatgpt_password}----oauth={'ok' if oauth_ok else 'fail'}----proxy={proxy_state}\n"
                     out.write(line)
 
             with _print_lock:
-                print(f"\n[OK] [{tag}] {email} 注册成功! 代理: {proxy_label}")
+                print(f"\n[OK] [{tag}] {email} 注册成功! 代理: {proxy_state}")
             return True, email, None
 
         except Exception as e:
             last_error = str(e)
             with _print_lock:
-                print(f"\n[FAIL] [{idx}] 尝试 {attempt}/3 失败: {last_error} | 代理: {proxy_label}")
+                print(f"\n[FAIL] [{idx}] 尝试 {attempt}/3 失败: {last_error} | 代理: {proxy_state}")
                 traceback.print_exc()
             if attempt >= 3:
                 return False, None, last_error
@@ -1296,7 +1304,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     print(f"  ChatGPT 批量自动注册 (MoeMail)")
     print(f"  运行模式: {MODE}")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
-    print(f"  代理: {actual_proxy or '无'}")
+    print(f"  代理: {_proxy_state(actual_proxy)}")
     print(f"  IPv6: {'开启' if use_ipv6 else '关闭'}")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'}")
     print(f"  输出文件: {output_file}")
